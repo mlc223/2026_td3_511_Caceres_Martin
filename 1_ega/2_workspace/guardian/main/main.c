@@ -4,6 +4,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "nvs_flash.h"
+#include "lcd_i2c.h"
 
 QueueHandle_t xColaEntrada=NULL;
 QueueHandle_t xColaBuffer=NULL;
@@ -59,7 +60,58 @@ struct DatoEstado
     tipoEscala mamp;
 };
 
+//Tarea Display prioridad 1//
+void tarea_Display(void *pvParameters){
+    struct DatoEstado EstadoVisual;
+    //1. INICIALIZACION DEL HARDWARE
+    lcd_inicializar_secuencia();
+    
+    char bufferfila1[32];// Buffer para la primera fila del display
+    char bufferfila2[32];
+    while(1){
+        //2. ESPERA DE DATOS DE LA COLA DE ESTADO, SIN DESTRUIR EL DATO
+        if(xQueuePeek(xColaEstado, &EstadoVisual, portMAX_DELAY)==pdTRUE)// Se utiliza QueuePeek para leer el dato sin eliminarlo de la cola
+        {
+            //3. CONVERTIR DE ENUMS A STRINGS PARA MOSTRAR EN EL DISPLAY
+            // Se utiliza el operador ternario para convertir el tipo de onda a string, ancho de 3 caracteres fijo
+            const char* strOnda=(EstadoVisual.tipo == SENOIDAL) ? "SEN" :
+                            (EstadoVisual.tipo == TRIANGULAR) ? "TRI" :
+                            (EstadoVisual.tipo == CUADRADA) ? "CUA" : "UNK";
 
+            //Ancho fijo de 4 caracteres para la frecuencia
+            const char* strEscalaFrec=(EstadoVisual.mfrec == ESCALA_x1) ? "x1  " :
+                            (EstadoVisual.mfrec == ESCALA_x10) ? "x10 " :
+                            (EstadoVisual.mfrec == ESCALA_x100) ? "x100" :
+                            (EstadoVisual.mfrec == ESCALA_x1000) ? "x1K " : "UNK ";
+
+            //Ancho fijo de 3 caracteres para la amplitud
+            const char* strEscalaAmp=(EstadoVisual.mamp == ESCALA_x1) ? "1m " :
+                            (EstadoVisual.mamp == ESCALA_x10) ? "10m" :
+                            (EstadoVisual.mamp == ESCALA_x100) ? ".1V" :
+                            (EstadoVisual.mamp == ESCALA_x1000) ? "1V " : "UNK";
+
+            //4. FORMATEO DE LOS DATOS PARA MOSTRAR EN EL DISPLAY
+            snprintf(bufferfila1, sizeof(bufferfila1), "%sF:%-5luHz%s", strOnda, EstadoVisual.frec, strEscalaFrec);// Formatea la primera fila del display con el tipo de onda, frecuencia y escala de frecuencia
+
+            snprintf(bufferfila2, sizeof(bufferfila2), "A:%.1fV %-3s O:%+.1fV", EstadoVisual.amplitud, strEscalaAmp, EstadoVisual.offset);// Formatea la segunda fila del display con la amplitud y escala de amplitud y el offset
+
+            //5. ENVIO DE LOS DATOS AL DISPLAY
+
+            lcd_ir_a(0, 0); // Mueve el cursor a la primera fila, primera columna
+            lcd_imprimir_cadena(bufferfila1); // Imprime la primera fila en el display
+            lcd_ir_a(1, 0); // Mueve el cursor a la segunda fila, primera columna
+            lcd_imprimir_cadena(bufferfila2); // Imprime la segunda fila en el display
+
+            vTaskDelay(pdMS_TO_TICKS(50)); // Se agrega un pequeño retardo para evitar parpadeos en el display
+
+            //2. LIBERACION DEL SEMAFORO PARA LA TAREA FLASH
+            xSemaphoreGive(xSemaforoSincro); // Se libera el semaforo para que la tarea flash pueda guardar el estado en la memoria flash NVS
+            vTaskDelay(pdMS_TO_TICKS(10)); // Se agrega retardo para evitar que la tarea display vuelva a tomar el dato de la cola
+                                            //y Flash no pueda accionar
+        }
+    }
+
+}
 
 //Tarea Flash prioridad 1//
 void tarea_Flash(void *pvParameters){
@@ -303,7 +355,7 @@ void tarea_Dato(void *pvParameters){
                     EstadoActual.frec = (uint32_t)dato_entrada.frec;
                     cambio_señal = true; // Habra que actualizar el display y reiniciar el cronometro de guardado en flash
                     cambio_buffer = true; // Habra que actualizar el buffer de la señal
-                    printf("DATO: Cambio de frecuencia a %ld Hz\n", EstadoActual.frec);
+                    printf("DATO: Cambio de frecuencia a %lu Hz\n", EstadoActual.frec);
                  }
                 if(EstadoActual.amplitud != dato_entrada.amplitud)
                  {
